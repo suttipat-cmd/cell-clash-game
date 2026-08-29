@@ -1,6 +1,6 @@
 import { defineConfig } from 'vite'
 
 export default defineConfig({
-  server: { proxy: { '/socket.io': { target: 'http://localhost:3001', ws: true } } },
+  base: process.env.VITE_BASE_PATH ?? '/',
   build: { target: 'es2022', sourcemap: true },
 })

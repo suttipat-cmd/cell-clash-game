@@ -1,25 +1,25 @@
 # Cell Clash
 
-An online, server-authoritative Agar-style arena for **2–5 guest players**. One central lobby supports Free for All and balanced Teams matches. Bots are deliberately excluded.
+A **2–5 player online Agar-style game** that runs entirely on **GitHub Pages + Supabase Realtime**. There is one central arena, Guest names, Free for All and Teams. No server, container, paid game host, login form, or bot is required.
 
-## Architecture
+## How it works
 
-- `apps/web` — Vite + TypeScript canvas renderer and input layer.
-- `apps/server` — Socket.IO authoritative simulation at 25 ticks per second. The browser only sends intent; the server calculates movement, food, viruses, splits, ejected mass, deaths and scores.
-- `packages/shared` — game constants, types and rules shared by the client/server.
-- `supabase` — anonymous guest identity, profile row and completed-match persistence schema. Supabase Realtime is not used for high-frequency movement.
+- The web build is static and deploys to GitHub Pages.
+- Supabase Realtime Presence lists players in `cell-clash:central`.
+- The longest-present connected player becomes the temporary match host. That browser simulates the arena and broadcasts snapshots at 15fps using Supabase Broadcast.
+- If the host leaves, the remaining players elect a new host and return safely to the lobby for a fresh round.
+- The Supabase publishable key is intentionally included in the static client build. It is a public key, not a secret or service-role credential.
 
-## Local development
+This design is deliberately limited to a friendly, small public room. A malicious browser can still alter its own client or impersonate input, so it is not appropriate for ranked play, prizes, or high-stakes leaderboards. Those require an authoritative game server.
 
-Requirements: Node 22+ (Node 24 recommended) and npm.
+## Play locally
 
 ```bash
-cp .env.example .env
 npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`. The web app uses Vite's WebSocket proxy to reach the local server on port 3001. `AUTH_REQUIRED=false` makes local game development possible before Supabase is configured; never deploy with that value.
+Open `http://localhost:5173` in two separate browser profiles/devices to test the shared room. The browser must be able to connect to `https://gnbvicxgcxskeydukdcv.supabase.co`.
 
 ```bash
 npm run test
@@ -27,38 +27,16 @@ npm run typecheck
 npm run build
 ```
 
-## Supabase setup
+## Deployment
 
-Project URL: `https://gnbvicxgcxskeydukdcv.supabase.co`
+Every push to `main` validates, builds, and deploys the static site to GitHub Pages. The workflow builds with `VITE_BASE_PATH=/cell-clash-game/`, so assets work beneath the repository page path.
 
-1. In **Authentication → Providers**, enable **Anonymous sign-ins**.
-2. In **Authentication → URL configuration**, add the production web URL and local `http://localhost:5173` as redirect URLs.
-3. In **Connect**, copy the `sb_publishable_...` key. It is safe to use in the browser; do not use a secret/service-role key there.
-4. Add the publishable key to the values in `.env`.
-5. Link the CLI and apply the committed migration:
+If GitHub Pages is not yet enabled, open **Repository → Settings → Pages** and choose **GitHub Actions** as the source once. The first successful deployment will then publish the game at:
 
-   ```bash
-   npx supabase@latest login
-   npx supabase@latest link --project-ref gnbvicxgcxskeydukdcv
-   npx supabase@latest db push
-   ```
+`https://suttipat-cmd.github.io/cell-clash-game/`
 
-6. In the Dashboard, run the security advisors after the migration. Every public table in the migration has RLS enabled.
+## Supabase
 
-## Production deployment
+The project is `cell-clash-prod` (`gnbvicxgcxskeydukdcv`). The initial migrations keep RLS enabled for profiles and match-history tables. The current realtime-only game does not need to expose database records to players; it uses the public Realtime channel only.
 
-The game server needs an always-on Node service with WebSocket support; static hosting alone (including GitHub Pages) is not enough.
-
-1. Deploy `apps/server` as a Docker service using `apps/server/Dockerfile`.
-2. Set `AUTH_REQUIRED=true`, `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, and `CLIENT_ORIGIN=https://your-web-domain` on the server. Do not place a Supabase secret key in the client.
-3. Deploy `apps/web` to any static host, set `VITE_GAME_SERVER_URL=https://your-game-server-domain` and the two `VITE_SUPABASE_*` values during its build.
-4. Add the final web URL to Supabase Auth redirect URLs and the server `CLIENT_ORIGIN` allow-list.
-5. Health check endpoint: `GET /healthz`.
-
-## Security model
-
-- The server validates authenticated Guest JWTs in production.
-- A client cannot send mass, coordinates, collisions, score or an arbitrary game-state update.
-- Input is normalized/rate-limited. Split/eject cooldowns and game rules are server-side.
-- RLS prevents a guest from reading or editing anyone else's profile, and browser roles have no direct access to match history writes.
-- The `service_role`/secret key is never exposed through Vite variables or source code.
+For a public friendly room, keep **Realtime Settings → Allow public access** enabled. If the game later gains accounts, private rooms, ranking, or moderation, migrate the channel to Realtime Authorization with authenticated users and RLS policies.

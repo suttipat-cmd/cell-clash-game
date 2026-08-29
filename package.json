@@ -3,14 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "packageManager": "npm@11.16.0",
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": ["apps/web", "packages/*"],
   "scripts": {
-    "dev": "npm run build -w @cell-clash/shared && concurrently -n web,server -c cyan,magenta \"npm run dev -w @cell-clash/web\" \"npm run dev -w @cell-clash/server\"",
-    "build": "npm run build -w @cell-clash/shared && npm run build -w @cell-clash/web && npm run build -w @cell-clash/server",
+    "dev": "npm run build -w @cell-clash/shared && npm run dev -w @cell-clash/web",
+    "build": "npm run build -w @cell-clash/shared && npm run build -w @cell-clash/web",
     "test": "npm run test -w @cell-clash/shared",
-    "typecheck": "npm run build -w @cell-clash/shared && npm run typecheck -w @cell-clash/web && npm run typecheck -w @cell-clash/server"
-  },
-  "devDependencies": {
-    "concurrently": "^9.2.1"
+    "typecheck": "npm run build -w @cell-clash/shared && npm run typecheck -w @cell-clash/web"
   }
 }

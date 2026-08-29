@@ -83,3 +83,5 @@ export function publicPlayer(player: Player): PublicPlayer {
     cells: player.cells.map(({ id, x, y, mass }) => ({ id, x: Math.round(x), y: Math.round(y), mass: Math.round(mass) })),
   }
 }
+
+export { Arena, type ArenaError } from './arena.js'

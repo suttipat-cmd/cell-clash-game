@@ -1,7 +1,7 @@
 import {
   clamp, cleanGuestName, createSpawn, distanceSquared, GAME, type Cell, type Food, type Mode, type Phase,
   type MatchResult, type Player, type Snapshot, type Vec, type Virus, publicPlayer, radiusForMass, speedForMass,
-} from '@cell-clash/shared'
+} from './index.js'
 
 const COLORS = ['#ff5d6c', '#5fa8ff', '#6edb94', '#ffc35a', '#bc82ff']
 const randomId = () => crypto.randomUUID()
