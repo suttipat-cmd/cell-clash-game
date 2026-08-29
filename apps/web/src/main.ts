@@ -4,9 +4,20 @@ import { Arena, GAME, type Mode, type PublicPlayer, type Snapshot } from '@cell-
 
 type PresencePlayer = { id: string; name: string; color: string; joinedAt: number }
 type Result = { winnerId: string | null; results: Array<{ id: string; name: string; score: number }> }
+type WireCell = [number, number, number]
+type WireFood = [number, number, 0 | 1]
+type WireVirus = [number, number, number]
+type WireSnapshot = Omit<Snapshot, 'players' | 'foods' | 'viruses'> & {
+  players: Array<Omit<PublicPlayer, 'cells'> & { cells: WireCell[] }>
+  foods?: WireFood[]
+  viruses?: WireVirus[]
+}
 const SUPABASE_URL = 'https://gnbvicxgcxskeydukdcv.supabase.co'
 const SUPABASE_KEY = 'sb_publishable_QhRYsmDW8phF3oVtcTo1Hg_uSlIKYUU'
 const ROOM_TOPIC = 'cell-clash:central'
+const SNAPSHOT_INTERVAL_MS = 100
+const MAP_INTERVAL_MS = 500
+const HUD_INTERVAL_MS = 100
 const app = document.querySelector<HTMLDivElement>('#app')!
 const savedName = localStorage.getItem('cell-clash-name') || `Blob${Math.floor(100 + Math.random() * 900)}`
 const playerId = localStorage.getItem('cell-clash-player-id') || crypto.randomUUID()
@@ -18,10 +29,15 @@ let channel: RealtimeChannel
 let presence: PresencePlayer[] = []
 let arena: Arena | null = null
 let snapshot: Snapshot | null = null
+let previousSnapshot: Snapshot | null = null
 let joined = false
 let nickname = savedName
 let latestPointer = { x: window.innerWidth / 2, y: window.innerHeight / 2 }
 let hostTimer: number | null = null
+let lastSnapshotAt = 0
+let lastMapAt = 0
+let lastHudAt = 0
+let snapshotReceivedAt = 0
 
 app.innerHTML = `
   <section class="shell">
@@ -56,8 +72,30 @@ function send(event: string, payload: Record<string, unknown> = {}) {
   const message = { id: playerId, ...payload }
   // Broadcast deliberately excludes its sender. The current host simulates the
   // authoritative arena, so it must apply its own command before relaying it.
-  if (isHost()) receive(event, message)
+  if (isHost() && event !== 'snapshot') receive(event, message)
   void channel.send({ type: 'broadcast', event, payload: message })
+}
+
+function packSnapshot(state: Snapshot, includeMap: boolean): WireSnapshot {
+  return {
+    tick: state.tick, phase: state.phase, mode: state.mode, timeLeft: state.timeLeft, countdownEndsAt: state.countdownEndsAt,
+    leaderboard: state.leaderboard,
+    players: state.players.map(({ cells, ...player }) => ({ ...player, cells: cells.map((cell) => [Math.round(cell.x), Math.round(cell.y), Math.round(cell.mass)] as WireCell) })),
+    ...(includeMap ? {
+      foods: state.foods.map((food) => [Math.round(food.x), Math.round(food.y), food.kind === 'eject' ? 1 : 0] as WireFood),
+      viruses: state.viruses.map((virus) => [Math.round(virus.x), Math.round(virus.y), Math.round(virus.radius)] as WireVirus),
+    } : {}),
+  }
+}
+
+function unpackSnapshot(wire: WireSnapshot, prior: Snapshot | null): Snapshot {
+  return {
+    tick: wire.tick, phase: wire.phase, mode: wire.mode, timeLeft: wire.timeLeft, countdownEndsAt: wire.countdownEndsAt,
+    leaderboard: wire.leaderboard,
+    players: wire.players.map(({ cells, ...player }) => ({ ...player, cells: cells.map((cell, index) => Array.isArray(cell) ? { id: `${player.id}:${index}`, x: cell[0], y: cell[1], mass: cell[2] } : cell) })),
+    foods: wire.foods ? wire.foods.map((food, index) => Array.isArray(food) ? { id: `food:${index}`, x: food[0], y: food[1], mass: food[2] ? 12 : GAME.foodMass, kind: food[2] ? 'eject' as const : 'food' as const } : food) : prior?.foods ?? [],
+    viruses: wire.viruses ? wire.viruses.map((virus, index) => Array.isArray(virus) ? { id: `virus:${index}`, x: virus[0], y: virus[1], radius: virus[2] } : virus) : prior?.viruses ?? [],
+  }
 }
 
 function renderLobby() {
@@ -85,19 +123,30 @@ function syncHostArena() {
     for (const id of [...arena.players.keys()]) if (!presentIds.has(id)) arena.leave(id)
     for (const player of [...presence].sort((a, b) => a.joinedAt - b.joinedAt)) { const error = arena.join(player.id, player.name); if (error === 'arena-full') send('rejected', { playerId: player.id }) }
   }
-  if (!hostTimer) hostTimer = window.setInterval(hostStep, 1000 / 15)
+  if (!hostTimer) hostTimer = window.setInterval(hostStep, 1000 / GAME.tickRate)
 }
 function hostStep() {
   if (!arena || !isHost()) return
-  const result = arena.update(); snapshot = arena.snapshot(); renderHud(); renderLobby()
-  send('snapshot', { state: snapshot })
+  const now = performance.now()
+  const result = arena.update(); snapshot = arena.snapshot()
+  if (now - lastHudAt >= HUD_INTERVAL_MS || result) { renderHud(); renderLobby(); lastHudAt = now }
+  if (now - lastSnapshotAt >= SNAPSHOT_INTERVAL_MS || result) {
+    const includeMap = now - lastMapAt >= MAP_INTERVAL_MS || lastMapAt === 0
+    send('snapshot', { state: packSnapshot(snapshot, includeMap) })
+    lastSnapshotAt = now
+    if (includeMap) lastMapAt = now
+  }
   if (result) send('matchFinished', result as unknown as Record<string, unknown>)
 }
 function presentIds() { return new Set(presence.map((player) => player.id)) }
 function acceptPlayer(id: unknown) { return typeof id === 'string' && presentIds().has(id) }
 function receive(event: string, raw: unknown) {
   const payload = raw as Record<string, unknown>
-  if (event === 'snapshot' && !isHost()) { const state = payload.state as Snapshot; if (state?.players) { snapshot = state; renderHud(); renderLobby() }; return }
+  if (event === 'snapshot' && !isHost()) {
+    const state = unpackSnapshot(payload.state as WireSnapshot, snapshot)
+    if (state?.players) { previousSnapshot = snapshot; snapshot = state; snapshotReceivedAt = performance.now(); renderHud(); renderLobby() }
+    return
+  }
   if (event === 'rejected' && payload.playerId === playerId) { joined = false; void channel.untrack(); say('The central arena is full. Try again after this match.', true); renderLobby(); return }
   if (event === 'matchFinished') { const result = payload as unknown as Result; const winner = result.results?.find((entry) => entry.id === result.winnerId); say(winner ? `${winner.name} wins with ${winner.score} mass. Next lobby opens shortly.` : 'Match complete.'); return }
   if (!arena || !isHost() || !acceptPlayer(payload.id)) return
@@ -148,7 +197,21 @@ setInterval(() => { const me = snapshot?.players.find((player) => player.id === 
 function cameraFor(player: PublicPlayer) { const center = player.cells.reduce((acc, cell) => ({ x: acc.x + cell.x / player.cells.length, y: acc.y + cell.y / player.cells.length }), { x: 0, y: 0 }); const mass = player.cells.reduce((sum, cell) => sum + cell.mass, 0); return { x: center.x, y: center.y, scale: Math.max(.42, Math.min(1.2, 1 - Math.log10(Math.max(mass, 1)) * .14)) } }
 function resize() { const dpr = Math.min(window.devicePixelRatio || 1, 2); canvas.width = Math.floor(window.innerWidth * dpr); canvas.height = Math.floor(window.innerHeight * dpr); canvas.style.width = `${window.innerWidth}px`; canvas.style.height = `${window.innerHeight}px`; context.setTransform(dpr, 0, 0, dpr, 0, 0) }
 window.addEventListener('resize', resize); resize()
-function draw() { const width = window.innerWidth, height = window.innerHeight; context.clearRect(0, 0, width, height); const me = snapshot?.players.find((player) => player.id === playerId); const camera = me?.cells.length ? cameraFor(me) : { x: GAME.mapSize / 2, y: GAME.mapSize / 2, scale: .55 }; context.save(); context.translate(width / 2, height / 2); context.scale(camera.scale, camera.scale); context.translate(-camera.x, -camera.y); drawGrid(camera, width, height); for (const food of snapshot?.foods ?? []) { context.fillStyle = food.kind === 'eject' ? '#ffe373' : '#77dfab'; context.beginPath(); context.arc(food.x, food.y, food.kind === 'eject' ? 8 : 4, 0, Math.PI * 2); context.fill() } for (const virus of snapshot?.viruses ?? []) { context.fillStyle = '#78ca6c'; context.beginPath(); context.arc(virus.x, virus.y, virus.radius, 0, Math.PI * 2); context.fill(); context.strokeStyle = '#b4ef97'; context.lineWidth = 4; context.stroke() } for (const player of snapshot?.players ?? []) for (const cell of player.cells) drawCell(cell, player, me?.id === player.id); context.restore(); requestAnimationFrame(draw) }
+function visualSnapshot() {
+  if (isHost() || !snapshot || !previousSnapshot) return snapshot
+  const progress = Math.min(1, (performance.now() - snapshotReceivedAt) / SNAPSHOT_INTERVAL_MS)
+  return {
+    ...snapshot,
+    players: snapshot.players.map((player) => {
+      const previousPlayer = previousSnapshot?.players.find((candidate) => candidate.id === player.id)
+      return { ...player, cells: player.cells.map((cell, index) => {
+        const previousCell = previousPlayer?.cells[index]
+        return previousCell ? { ...cell, x: previousCell.x + (cell.x - previousCell.x) * progress, y: previousCell.y + (cell.y - previousCell.y) * progress } : cell
+      }) }
+    }),
+  }
+}
+function draw() { const width = window.innerWidth, height = window.innerHeight; const frame = visualSnapshot(); context.clearRect(0, 0, width, height); const me = frame?.players.find((player) => player.id === playerId); const camera = me?.cells.length ? cameraFor(me) : { x: GAME.mapSize / 2, y: GAME.mapSize / 2, scale: .55 }; context.save(); context.translate(width / 2, height / 2); context.scale(camera.scale, camera.scale); context.translate(-camera.x, -camera.y); drawGrid(camera, width, height); for (const food of frame?.foods ?? []) { context.fillStyle = food.kind === 'eject' ? '#ffe373' : '#77dfab'; context.beginPath(); context.arc(food.x, food.y, food.kind === 'eject' ? 8 : 4, 0, Math.PI * 2); context.fill() } for (const virus of frame?.viruses ?? []) { context.fillStyle = '#78ca6c'; context.beginPath(); context.arc(virus.x, virus.y, virus.radius, 0, Math.PI * 2); context.fill(); context.strokeStyle = '#b4ef97'; context.lineWidth = 4; context.stroke() } for (const player of frame?.players ?? []) for (const cell of player.cells) drawCell(cell, player, me?.id === player.id); context.restore(); requestAnimationFrame(draw) }
 function drawGrid(camera: { x: number; y: number; scale: number }, width: number, height: number) { const gap = 120, viewW = width / camera.scale, viewH = height / camera.scale; context.strokeStyle = 'rgba(151, 193, 235, .10)'; context.lineWidth = 1; for (let x = Math.floor((camera.x - viewW / 2) / gap) * gap; x < camera.x + viewW / 2; x += gap) { context.beginPath(); context.moveTo(x, camera.y - viewH / 2); context.lineTo(x, camera.y + viewH / 2); context.stroke() } for (let y = Math.floor((camera.y - viewH / 2) / gap) * gap; y < camera.y + viewH / 2; y += gap) { context.beginPath(); context.moveTo(camera.x - viewW / 2, y); context.lineTo(camera.x + viewW / 2, y); context.stroke() } }
 function drawCell(cell: { x: number; y: number; mass: number }, player: PublicPlayer, isMe: boolean) { const radius = Math.sqrt(cell.mass) * 4; context.beginPath(); context.arc(cell.x, cell.y, radius, 0, Math.PI * 2); context.fillStyle = player.color; context.fill(); context.lineWidth = isMe ? 5 : 3; context.strokeStyle = isMe ? '#fff6cc' : 'rgba(255,255,255,.7)'; context.stroke(); if (radius > 24) { context.fillStyle = '#102039'; context.font = `700 ${Math.max(13, radius / 2.7)}px system-ui`; context.textAlign = 'center'; context.fillText(player.name, cell.x, cell.y + 5) } }
 draw(); renderLobby()
