@@ -52,7 +52,13 @@ function phase() { return snapshot?.phase ?? 'lobby' }
 function mode() { return snapshot?.mode ?? 'ffa' }
 function escapeHtml(value: string) { const node = document.createElement('span'); node.textContent = value; return node.innerHTML }
 function formatTime(value: number) { return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}` }
-function send(event: string, payload: Record<string, unknown> = {}) { void channel.send({ type: 'broadcast', event, payload: { id: playerId, ...payload } }) }
+function send(event: string, payload: Record<string, unknown> = {}) {
+  const message = { id: playerId, ...payload }
+  // Broadcast deliberately excludes its sender. The current host simulates the
+  // authoritative arena, so it must apply its own command before relaying it.
+  if (isHost()) receive(event, message)
+  void channel.send({ type: 'broadcast', event, payload: message })
+}
 
 function renderLobby() {
   const players = currentPlayers(); const host = isHost(); const currentPhase = phase(); const activeMatch = currentPhase === 'playing' || currentPhase === 'countdown'
@@ -99,8 +105,18 @@ function receive(event: string, raw: unknown) {
   if (event === 'input') arena.input(id, payload.vector)
   if (event === 'split') arena.split(id)
   if (event === 'eject') arena.eject(id)
-  if (event === 'startMatch') arena.start(id)
-  if (event === 'setMode') arena.setMode(id, payload.mode)
+  if (event === 'startMatch') {
+    arena.start(id)
+    snapshot = arena.snapshot()
+    renderHud()
+    renderLobby()
+  }
+  if (event === 'setMode') {
+    arena.setMode(id, payload.mode)
+    snapshot = arena.snapshot()
+    renderHud()
+    renderLobby()
+  }
 }
 function syncPresence() {
   const state = channel.presenceState<PresencePlayer>()
